@@ -6,9 +6,9 @@
     modification, are permitted provided that the following conditions are met:
     
     * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
+      notice, this List of conditions and the following disclaimer.
     * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
+      notice, this List of conditions and the following disclaimer in the
       documentation and/or other materials provided with the distribution.
     * Neither the name of Salesforce.org nor the names of
       its contributors may be used to endorse or promote products derived
@@ -36,6 +36,9 @@
 */
 public class ADDR_Account_TDTM extends TDTM_Runnable {
 
+    /* @description static flag to prevent recursive call */
+    public static boolean hasRunAddrTrigger = false;
+    
     /*******************************************************************************************************
     * @description Trigger Handler on Account that handles Address management.
     * @param listNew the list of Accounts from trigger new. 
@@ -48,123 +51,122 @@ public class ADDR_Account_TDTM extends TDTM_Runnable {
         TDTM_Runnable.Action triggerAction, Schema.DescribeSObjectResult objResult) {
             
         DmlWrapper dmlWrapper = new DmlWrapper();  
-        list<Account> listAccCreateAddr = new list<Account>();      
+        List<Account> ListAccCreateAddr = new List<Account>();      
+        List<Account> ListAccsAddrInfoCleared = new List<Account>();
        
-        integer i = -1;        
+        Integer i = -1;        
         for (SObject so : listNew) {
             Account acc = (Account)so;
             i++;
-
-            // BEFORE INSERT
-            if (triggerAction == TDTM_Runnable.Action.BeforeInsert) {
-            }
-            
-            // BEFORE UPDATE
-            if (triggerAction == TDTM_Runnable.Action.BeforeUpdate) {
-            }
             
             // AFTER INSERT
             if (triggerAction == TDTM_Runnable.Action.AfterInsert) {
                 // for new accounts that are using address management, create the address object.
                 if (UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c != null && acc.RecordTypeId != null
                 && UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c.contains(acc.RecordTypeId)) {
-                    if (isAccountAddressSpecified(acc))
-                        listAccCreateAddr.add(acc);
+                    if (!ADDR_Addresses_UTIL.isAccAddressEmpty(acc))
+                        ListAccCreateAddr.add(acc);
                 }
             }
     
             // AFTER UPDATE
-            if (triggerAction == TDTM_Runnable.Action.AfterUpdate) {
-                Account accOld = (Account)listOld[i];
-                // note that we detect whether the address change is coming from the address trigger,
-                // in which case we don't want to create a new address.
-                if (ADDR_Addresses_TDTM.hasRunAddrTrigger) {
-                    continue;
-                }
-                if (UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c != null && acc.RecordTypeId != null
-                && UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c.contains(acc.RecordTypeId)) {
-                    // if the address changed, remember the account we want to add a new address for    
-                    if (isAccountAddressChanged(acc, accOld)) 
-                        listAccCreateAddr.add(acc);
+            if (triggerAction == TDTM_Runnable.Action.AfterUpdate) {  
+                // if address change is coming from the address trigger we don't want to create a new address   
+                if (!ADDR_Addresses_TDTM.hasRunAddrTrigger) {
+	                if (UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c != null && acc.RecordTypeId != null
+	                && UTIL_CustomSettingsFacade.getSettings().Accounts_Addresses_Enabled__c.contains(acc.RecordTypeId)) {
+	                    Account accOld = (Account)listOld[i];
+	                    // if the address info has been removed
+	                    if(!ADDR_Addresses_UTIL.isAccAddressEmpty(accOld) && ADDR_Addresses_UTIL.isAccAddressEmpty(acc))
+	                        ListAccsAddrInfoCleared.add(acc);
+	                    // if the address changed, remember the account we want to add a new address for    
+	                    else if (ADDR_Addresses_UTIL.isAccountAddressChanged(acc, accOld)) 
+	                        ListAccCreateAddr.add(acc);
+	                }
                 }
             }                
         }
 
         // create any new Address objects
-        if (listAccCreateAddr.size() > 0)
-            createAddrFromAcc(listAccCreateAddr, dmlWrapper);
-                    
+        if (ListAccCreateAddr.size() > 0)
+            createAddrFromAcc(ListAccCreateAddr, dmlWrapper);
+        
+        // handle accs with address info removed
+        if(ListAccsAddrInfoCleared.size() > 0)
+            addrInfoDeleted(ListAccsAddrInfoCleared, dmlWrapper);
+        
+        hasRunAddrTrigger = true;
+                            
         return dmlWrapper;    
     }
     
     /*******************************************************************************************************
-    * @description utility to see if an address is specified
-    * @param acc1 an Account
-    * @return boolean.  true if an address is specified in any of the Account Billing fields
-    ********************************************************************************************************/
-    private boolean isAccountAddressSpecified(Account acc1) {
-        if (acc1 == null) 
-           return false;
-        
-        boolean isSpecified = 
-           acc1.BillingStreet != null ||
-           acc1.BillingCity != null ||
-           acc1.BillingState != null ||
-           acc1.BillingPostalCode != null ||
-            // note that we decided to ignore country so that a default value won't create unnecessary address objects
-           (acc1.BillingCountry != null && !ADDR_Addresses_TDTM.isStateCountryPicklistsEnabled) ||
-           // only test StateCode if picklists enabled.
-           (ADDR_Addresses_TDTM.isStateCountryPicklistsEnabled && acc1.get('BillingStateCode') != null);
-
-        return isSpecified;   
-    }
-
-    /*******************************************************************************************************
-    * @description utility to compare two Accounts' (billing) addresses
-    * @param acc1 an Account
-    * @param acc2 an Account
-    * @return boolean. true if there are any changes between the two accounts.
-    ********************************************************************************************************/
-    private boolean isAccountAddressChanged(Account acc1, Account acc2) {
-        if (acc1 == null || acc2 == null) 
-           return false;
-        
-        boolean isChanged = 
-           !ADDR_Addresses_TDTM.equalsCaseSensitive(acc1.BillingStreet, acc2.BillingStreet) ||
-           !ADDR_Addresses_TDTM.equalsCaseSensitive(acc1.BillingCity, acc2.BillingCity) ||
-           !ADDR_Addresses_TDTM.equalsCaseSensitive(acc1.BillingState, acc2.BillingState) ||
-           !ADDR_Addresses_TDTM.equalsCaseSensitive(acc1.BillingPostalCode, acc2.BillingPostalCode) ||
-           !ADDR_Addresses_TDTM.equalsCaseSensitive(acc1.BillingCountry, acc2.BillingCountry);
-
-        if (!isChanged && ADDR_Addresses_TDTM.isStateCountryPicklistsEnabled) {
-            isChanged = 
-                !ADDR_Addresses_TDTM.equalsCaseSensitive(string.valueOf(acc1.get('BillingStateCode')), string.valueOf(acc2.get('BillingStateCode'))) || 
-                !ADDR_Addresses_TDTM.equalsCaseSensitive(string.valueOf(acc1.get('BillingCountryCode')), string.valueOf(acc2.get('BillingCountryCode')));
-        }
-        UTIL_Debug.debug('****Address changed: ' + isChanged);
-        return isChanged;   
-
-    }
-
-    /*******************************************************************************************************
     * @description for each Account, create a new default address and add it to dmlWrapper
-    * @param listAcc a list of Accounts
+    * @param ListAcc a List of Accounts
     * @param dmlWrapper to hold the Addresses that need creating
     * @return void
     ********************************************************************************************************/
-    private void createAddrFromAcc(list<Account> listAcc, DmlWrapper dmlWrapper) {
-        list<Address__c> listAddr = new list<Address__c>();
-        for (Account acc : listAcc) {
+    private void createAddrFromAcc(List<Account> ListAcc, DmlWrapper dmlWrapper) {
+        List<Address__c> ListAddr = new List<Address__c>();
+        for (Account acc : ListAcc) {
             Address__c addr = new Address__c();
             addr.Parent_Account__c = acc.Id;
             addr.Default_Address__c = true;
             addr.Latest_Start_Date__c = system.today();
             addr.Latest_End_Date__c = null;
-            ADDR_Addresses_TDTM.copyAddressStdSObjAddr(acc, 'Billing', addr, null);            
-            listAddr.add(addr);         
+            ADDR_Addresses_UTIL.copyAddressStdSObjAddr(acc, 'Billing', addr, null);            
+            ListAddr.add(addr);
+            UTIL_Debug.debug('****New address record: ' + JSON.serializePretty(addr));
         }
-        // since coming from an account address, there is no Address Type, so exclude it from the match testing.
-        ADDR_Addresses_TDTM.createNonDuplicateAddresses(listAddr, dmlWrapper, false);
+        //since coming from an account address, there is no Address Type, so exclude it from the match testing.
+        List<Address__c> newAddrs = ADDR_Addresses_UTIL.createNonDuplicateAddresses(ListAddr, dmlWrapper, false);
+        
+        //Match each Account with each new address
+        List<ID> accIDsToUpdate = new List<ID>();
+        Map<ID, Address__c> parentAccIdToAddrMap = new Map<ID, Address__c>();
+        for(Address__c addr : newAddrs) {
+            if(addr.Parent_Account__c != null) {
+	           accIDsToUpdate.add(addr.Parent_Account__c);
+	           parentAccIdToAddrMap.put(addr.Parent_Account__c, addr);  
+            }
+        }
+        
+        //We need to re-query before we are in the "after" part of the trigger. We cannot change it to before because
+        //we need the Account ID to have a value when populating the addr.Parent_Account__c field above.
+        List<Account> parentAccs = [select is_Address_Override__c, Current_Address__c from Account where ID in :accIDsToUpdate];
+        List<Account> accsToUpdate = new List<Account>();
+        for(Account acc : parentAccs) {
+            Address__c childAddr = parentAccIdToAddrMap.get(acc.Id);
+            if(childAddr != null && !acc.is_Address_Override__c) {
+                acc.Current_Address__c = childAddr.Id;
+                accsToUpdate.add(acc);
+            }
+        }
+        update accsToUpdate;
     }
-
+    
+    private void addrInfoDeleted(List<Account> ListAccsAddrInfoCleared, DmlWrapper dmlWrapper) {
+        List<ID> oldCurrentAddrIDs = new List<ID>();
+        
+        //We need to re-query before we are in the "after" part of the trigger
+        List<Account> accs = [select is_Address_Override__c, Current_Address__c from Account where ID in :ListAccsAddrInfoCleared];
+        
+        // clear Current_Address__c field from accs
+        for(Account acc : accs) {
+            if(acc.Current_Address__c != null) // get all current addrs
+                oldCurrentAddrIDs.add(acc.Current_Address__c);
+            acc.Current_Address__c = null;
+            acc.is_Address_Override__c = false;
+            dmlWrapper.objectsToUpdate.add(acc); 
+        }
+        
+        // clear Default_Address__c field from child addrs
+        List<Address__c> addrs = [select Default_Address__c from Address__c where Default_Address__c = true  and ID in :oldCurrentAddrIDs];
+        for(Address__c addr : addrs) {
+            addr.Default_Address__c = false;
+            dmlWrapper.objectsToUpdate.add(addr);
+        }
+        //Don't run ADDR_Addresses_TDTM for these updated addresses
+        ADDR_Addresses_TDTM.hasRunAddrTrigger = true;
+    }
 }
